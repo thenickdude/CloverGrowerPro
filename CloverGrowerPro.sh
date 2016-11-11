@@ -33,6 +33,7 @@ MAKE_PACKAGE=1
 CLOVER_REMOTE_REV=
 CLOVER_LOCAL_REV=
 FORCE_REVISION=
+FORCE_EDK2_REVISION=
 FORCE_CHECK_UPDATE=0
 UPDATE_SOURCES=1
 FW_VBIOS_PATH=
@@ -45,6 +46,7 @@ usage () {
     echo "Compile Clover UEFI/Bios OS X Booter"
     echo
     printOptionHelp "-r, --revision"     "compile a specific Clover revision"
+    printOptionHelp "--edk2-revision"     "compile a specific EDK2 revision"
     printOptionHelp "-t, --target"       "choose target(s) to build [default=x64]. Targets currently supported: ia32, x64 and x64-mcp. You can specify multiple targets (ie. --target=\"ia32 x64\")."
     printOptionHelp "-u, --check-update" "force check update."
     printOptionHelp "-n, --no-source-updates" "Disable clover and edk2 source updates."
@@ -57,7 +59,11 @@ usage () {
 
 function checkOptions() {
     if [[ -n "$FORCE_REVISION" && ! "$FORCE_REVISION" =~ ^[0-9]*$ ]];then
-        die "Invalid revision '$FORCE_REVISION': must be an integer !"
+        die "Invalid clover revision '$FORCE_REVISION': must be an integer !"
+    fi
+
+        if [[ -n "$FORCE_EDK2_REVISION" && ! "$FORCE_EDK2_REVISION" =~ ^[0-9]*$ ]];then
+        die "Invalid edk2 revision '$FORCE_EDK2_REVISION': must be an integer !"
     fi
 }
 
@@ -341,7 +347,8 @@ function getSOURCEFILE() {
 
     local localRev=$(getSvnRevision "$localdir")
     local checkoutRev=$remoteRev
-    [[ "$localdir" == */Clover ]] && checkoutRev=${FORCE_REVISION:-$remoteRev}
+    [[ "$name" == "Clover" ]] && checkoutRev=${FORCE_REVISION:-$remoteRev}
+    [[ "$name" == "edk2" ]] && checkoutRev=${FORCE_EDK2_REVISION:-$remoteRev}
 
     if [[ "${localRev}" == "${checkoutRev}" ]]; then
         echob "    Checked $name SVN, 'No updates were found...'"
@@ -352,15 +359,13 @@ function getSOURCEFILE() {
     printf "    %s %s %s %s ...\n" "$(sayColor info Auto Updating $name From)" "$(sayColor yellow $localRev)" "$(sayColor info 'to')" "$(sayColor green $checkoutRev)"
     tput bel
 
-    if [[ "$localdir" == */Clover ]]; then
-        update_repository --remote-url="$svnremoteurl" --force-revision="$checkoutRev" "$localdir"
-    else
+    if [[ "$name" == "edk2" ]]; then
         # EDK2 directory
         # First revert local modifications done by EDK2 patches
         svn revert -q -R "$localdir"
-
-        update_repository --remote-url="$svnremoteurl" "$localdir"
     fi
+
+    update_repository --remote-url="$svnremoteurl" --force-revision="$checkoutRev" "$localdir"
 
     checkit "    Svn up $name" "$svnremoteurl"
 
@@ -377,7 +382,7 @@ function getSOURCE() {
     fi
 
     # Don't update edk2 if no Clover updates
-    if [[ "${cloverUpdate}" == "Yes" ]]; then
+    if [[ "${cloverUpdate}" == "Yes" || "${edk2Update}" == "Yes" ]]; then
         # Get edk2 source
         cd "${srcDIR}"
         getSOURCEFILE edk2 "$EDK2DIR" "$EDK2SVNURL"
@@ -410,10 +415,12 @@ function getSOURCE() {
     fi
 
     # Get Clover source
-    cd "${EDK2DIR}"
-    getSOURCEFILE Clover "$CloverDIR" "$CLOVERSVNURL"
-    buildClover=$?
-    echo
+    if [[ "${cloverUpdate}" == "Yes" ]]; then
+        cd "${EDK2DIR}"
+        getSOURCEFILE Clover "$CloverDIR" "$CLOVERSVNURL"
+        buildClover=$?
+        echo
+    fi
 }
 
 # compiles X64 or IA32 versions of Clover and rEFIt_UEFI
@@ -565,10 +572,14 @@ function makePKG(){
     echo
 
     cloverUpdate="No"
+    edk2Update="No"
     versionToBuild=
+    edk2VersionToBuild=
 
     if [[ -d "${CloverDIR}" ]]; then
         CLOVER_LOCAL_REV=$(getSvnRevision "${CloverDIR}")
+        EDK2_LOCAL_REV=$(getSvnRevision "${EDK2DIR}")
+
         if [[ -d "${CloverDIR}/.git" ]]; then
             # Check if we are on the master branch
             local branch=$(cd "$CloverDIR" && LC_ALL=C git rev-parse --abbrev-ref HEAD)
@@ -609,14 +620,24 @@ function makePKG(){
                      "$(echob 'Current revision:')" "$(sayColor green ${CLOVER_LOCAL_REV})"
                 fi
             fi
+
+            if [[ -n "$FORCE_EDK2_REVISION" ]]; then
+                edk2VersionToBuild=$FORCE_EDK2_REVISION
+                if [[ "${EDK2_LOCAL_REV}" -ne "${edk2VersionToBuild}" ]]; then
+                    printf "%s %s\n" "$(sayColor info 'Forcing EDK2 revision')" "$(sayColor yellow $edk2VersionToBuild)"
+                    edk2Update="Yes"
+                fi
+            fi
         fi
     else
         CLOVER_LOCAL_REV=0
+        EDK2_LOCAL_REV=0
         cloverUpdate="Yes"
+        edk2Update="Yes"
     fi
 
     echo
-    if [[ "${cloverUpdate}" == "Yes" ]]; then
+    if [[ "${cloverUpdate}" == "Yes" || "${edk2Update}" == "Yes" ]]; then
         echob "Getting SVN Source, Hang ten…"
         getSOURCE
         CLOVER_LOCAL_REV=$(getSvnRevision "${CloverDIR}") # Update
@@ -766,6 +787,14 @@ while [[ $# -gt 0 ]]; do
                      shift
                      FORCE_REVISION=$(echo "$option" | sed 's/--revision=//')
                      ARGS[${#ARGS[*]}]="--revision=$FORCE_REVISION" ;;
+        --edk2-revision)
+                     shift
+                     FORCE_EDK2_REVISION=$(argument $option "$@"); shift
+                     ARGS[${#ARGS[*]}]="--edk2-revision=$FORCE_EDK2_REVISION" ;;
+        --edk2-revision=*)
+                     shift
+                     FORCE_EDK2_REVISION=$(echo "$option" | sed 's/--edk2-revision=//')
+                     ARGS[${#ARGS[*]}]="--edk2-revision=$FORCE_EDK2_REVISION" ;;
         -t | --target)
                      shift
                      force_target=$(argument $option "$@"); shift
